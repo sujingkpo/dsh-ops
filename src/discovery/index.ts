@@ -300,7 +300,13 @@ export function apply(root: Context, raw: unknown, gate: DiscoveryGate = { allow
     }
     onToolChange(ctx, scopes => {
       if (mutating || ownership?.publishing()) return
-      if (!scopes?.length) { refresh(); return }
+      // An unattributed change cannot be narrowed to a scope. Dropping every probe here
+      // makes the next reconcile re-assemble the prompt once per live Agent, so creating
+      // one session costs N+1 full assemblies and the click waits for all of them. Keep
+      // the cached verdicts and reconcile instead: agents whose observed inputs changed
+      // still re-probe, and the step/execution probes (always fresh) remain the authority
+      // on whether discovery may publish at all.
+      if (!scopes?.length) { void reconcile(); return }
       const affected = new Set<Agent>()
       for (const [agent, entry] of entries) if (scopes.some(scope => scopeChainOf(agent).includes(scope))) { invalidate(entry); affected.add(agent) }
       void reconcile(affected)

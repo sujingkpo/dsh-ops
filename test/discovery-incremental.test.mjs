@@ -276,12 +276,12 @@ await test('an invalidation during asynchronous assembly cannot publish the reti
       return next()
     })
     hold = true
-    await ctx.serial('tools/change'); await entering
+    await ctx.serial('system-prompt/change'); await entering
     ptc = true
-    await ctx.serial('tools/change')
+    await ctx.serial('system-prompt/change')
     release(); await flush(owner)
     assert.equal(visible(ctx, owner), false)
-    ptc = false; await ctx.serial('tools/change'); await flush(owner)
+    ptc = false; await ctx.serial('system-prompt/change'); await flush(owner)
     assert.equal(visible(ctx, owner), true)
   } finally { release?.(); await shutdown(ctx) }
 }))
@@ -346,13 +346,13 @@ await test('unloading during a probe cannot resurrect registrations or leave cha
       if (isPresentationProbe(context) && hold) { hold = false; entered(); await blocked }
       return next()
     })
-    await ctx.serial('tools/change'); await entering
+    await ctx.serial('system-prompt/change'); await entering
     const closing = row.dispose()
     release(); await closing
     assert.equal(visible(ctx, owner), false)
     assert.equal((await cached.execute({ query: 'stat' }, { agent: owner })).status, 'rejected')
     counts.clear()
-    await ctx.serial('tools/change'); await ctx.serial('system-prompt/change'); await tick()
+    await ctx.serial('system-prompt/change'); await tick()
     assert.equal(counts.size, 0)
   } finally { release?.(); await shutdown(ctx) }
 }))

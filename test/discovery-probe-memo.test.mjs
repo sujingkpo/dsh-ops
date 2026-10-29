@@ -1,4 +1,4 @@
-/** Discovery uses attributed OPS changes locally and conservatively probes unknown host notifications. */
+/** Discovery narrows attributed OPS changes locally and never re-probes the whole roster on an unattributed one. */
 import { createScope } from '@deepseek-ai/dsh-scope'
 import Sandbox from '@deepseek-ai/dsh-sandbox-local'
 import Subprocess from '@deepseek-ai/dsh-subprocess-local'
@@ -16,7 +16,7 @@ const foreignTool = name => ({
   execute: async () => ({ content: 'ok' }),
 })
 
-await test('an attributed unrelated scope change skips probes but unknown host notifications stay fresh', () => withTempDir('discovery', async dir => {
+await test('attributed unrelated changes and unattributed host notifications both keep the cached verdict', () => withTempDir('discovery', async dir => {
   const { ctx } = await bootHost()
   try {
     await ctx.plugin(Subprocess)
@@ -33,20 +33,23 @@ await test('an attributed unrelated scope change skips probes but unknown host n
     let probes = 0
     prompt.assemble = context => { if (isPresentationProbe(context)) ++probes; return assemble(context) }
     try {
-      // A real registration moves the surface, so the first reconcile owes (and makes) a probe.
-      const registered = ctx.get('tools').register(foreignTool('probe_memo_alpha'))
+      // A prompt registry change is the signal that genuinely owes a fresh verdict.
+      await ctx.serial('system-prompt/change')
       await wait(300)
       const settled = probes
-      assert.ok(settled > 0, 'a registry change probes the agent at least once (precondition)')
+      assert.ok(settled > 0, 'a prompt registry change probes the agent at least once (precondition)')
       // Package-owned sibling changes carry exact scope attribution; they cannot
-      // affect this root agent, unlike an unknown external prompt/tool provider.
+      // affect this root agent, unlike an unknown external provider.
       await withToolChange([{}], () => ctx.serial('tools/change', {}))
       await wait(300)
       assert.equal(probes, settled, 'unrelated OPS registration must not re-probe')
+      // An unattributed notification no longer drops the cached verdicts: dropping them
+      // re-assembled the prompt once per live Agent, so creating one session cost N+1
+      // assemblies. The step and execution probes are still fresh and remain the
+      // authority on whether discovery may publish.
       await ctx.serial('tools/change', {})
       await wait(300)
-      assert.ok(probes > settled, 'unknown registry notifications conservatively invalidate the verdict')
-      registered()
+      assert.equal(probes, settled, 'unknown registry notifications keep the cached verdict off the creation path')
     } finally { prompt.assemble = assemble }
   } finally { await shutdown(ctx) }
 }))

@@ -13,6 +13,16 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   sessions' discovery selections intact and authorize external calls only in their owned wrapper.
 - Diagnose the selected discovery/shell services and scoped publication; clarify the host's
   ancestor-registration/restriction limit for nested unrelated preset integrations.
+- Stop dropping every cached presentation probe on an unattributed tools/change. Creating one
+  session made the host emit such a change while the new scope was being established, so the next
+  reconcile re-assembled the system prompt once per live Agent - N+1 full assemblies before the new
+  session could render (measured 2.9 s with 8 sessions open, 0.03 s with discovery disabled). The
+  cached verdicts now survive; agents whose observed inputs changed still re-probe, and the step and
+  execution probes stay fresh, so discovery still withdraws when the surface actually turns PTC-only.
+- 未归属的 tools/change 不再清空全部呈现探测缓存。新建会话时宿主会在新作用域建立期间发出这种变更，
+  导致下一次 reconcile 为每个存活会话重新装配一次系统提示词——新会话渲染前要跑 N+1 次完整装配
+  （实测 8 个已开会话时 2.9 秒，禁用 discovery 后 0.03 秒）。现在保留缓存裁决；观测输入变化的会话仍会重探，
+  模型步与执行时的探测始终是新鲜的，所以呈现真的切成 PTC-only 时 discovery 仍会如期撤回。
 - 切换离开已接入预设时撤回 PTC 发布并取消调用；保留其他会话的发现选择，外部调用仅在自有包装内授权一次。
 - 诊断所选发现/Shell 的服务与作用域发布，并说明无关预设嵌套时宿主继承祖先注册/限制的边界。
 - Plan only the new Agent on `agent/created` instead of re-reading every live session's tool
