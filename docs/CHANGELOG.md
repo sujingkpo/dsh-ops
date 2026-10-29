@@ -30,6 +30,14 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   工作区 ACL，不再在每次首次 confine 前先启动 Windows PowerShell。准备写入的是目录上的持久 ACE，
   已准备过的工作区（哪怕是上一个进程准备的）不再为解释器等约 1 秒；每个工作区的首个会话、以及宿主
   重启后的首个会话，从约 2.3 秒降到约 1.2 秒。
+- Give a full-access session its result cache directory directly instead of narrowing it back to
+  `workspace-write` for confinement. Cleanup already skipped confinement for the same reason, so the
+  only thing the narrow path still bought was a random private directory — now taken with one
+  `mkdtemp` (~2 ms instead of ~1.4 s on a workspace the runner has not prepared). Read-only and
+  workspace-write keep the confined path unchanged.
+- 完全权限会话直接取自己的结果缓存目录，不再为取目录把策略收窄回 `workspace-write` 去 confine。清理
+  路径本就出于同样理由跳过 confine，收窄唯一还买到的只是一个随机私有目录——现在用一次 `mkdtemp`
+  取得（未准备过的工作区约 2 毫秒，原来约 1.4 秒）。只读与 workspace-write 的 confine 路径不变。
 
 ## [0.5.0] — 2026-10-27 — Preset-mode component roster
 

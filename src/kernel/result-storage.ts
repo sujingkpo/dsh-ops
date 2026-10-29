@@ -56,6 +56,27 @@ export function exposePosixCache(argv: readonly string[], storage: WorkerStorage
     || !path.isAbsolute(storage.root)) return [...argv]
   return [...argv.slice(0, separator), '--bind', storage.root, storage.root, ...argv.slice(separator)]
 }
+/**
+ * The cache root a full-access session owns without asking the sandbox for one.
+ *
+ * 'windows-acl' confinement would create a private random directory as a side effect, but it
+ * also materializes the runner's workspace and temp ACEs (and, on a workspace it has never
+ * prepared, an interpreter run). A full-access session already executes without those ACEs,
+ * and purge() below skips confinement for exactly the same reason, so the directory alone is
+ * what the cache needs. Same shape posixCacheLocation enforces: a random leaf under the
+ * canonical temp root, created without following any caller path.
+ */
+function fullAccessCacheLocation(): Location {
+  // realpath first: tmpdir() itself may be a junction, and a random leaf below a reparse
+  // point would put the cache somewhere the checks below cannot vouch for.
+  const parent = fs.realpathSync(tmpdir())
+  const root = fs.mkdtempSync(path.join(parent, 'dsh-ops-results-'))
+  const info = fs.lstatSync(root)
+  // Windows reports no POSIX permission bits (a fresh directory reads 0o666), so the identity
+  // checks here are directory-ness and no symlink; mkdtemp created the leaf below realpath().
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Result cache root must be a private directory')
+  return { root }
+}
 function posixCacheLocation(key: string, create: boolean): Location | undefined {
   const parent = fs.realpathSync(tmpdir()), root = path.join(parent, `dsh-ops-results-${key}`)
   // Only one fresh leaf under the canonical temp root. No recursive mkdir through caller paths.
@@ -111,17 +132,22 @@ export async function resultStorage(ctx: StorageHost, session: ResultSession, sc
   if (process.platform === 'win32') {
     if (!location && policy.mode !== 'read-only') {
       if (policy.sessionId !== session.id) return undefined
-      // Full access is voluntarily narrowed for cache preparation; file execution keeps its own path.
-      const cachePolicy = { ...policy, mode: 'workspace-write' as const }
-      if (!confined) {
-        const sandbox = ctx.get('sandbox')
-        if (!sandbox) return undefined
-        // Prepare the ACL only when confinement reports it missing: the grant outlives the
-        // process, so a workspace prepared once never pays for the interpreter again.
-        confined = await confineWorkspace(cachePolicy, () => sandbox.confine([file], cachePolicy, signal))
+      if (policy.mode === 'danger-full-access') {
+        // Full access runs unconfined by user choice, so narrowing it back to workspace-write
+        // for a cache directory only ever bought the directory itself. Take one directly.
+        location = fullAccessCacheLocation()
+      } else {
+        const cachePolicy = { ...policy, mode: 'workspace-write' as const }
+        if (!confined) {
+          const sandbox = ctx.get('sandbox')
+          if (!sandbox) return undefined
+          // Prepare the ACL only when confinement reports it missing: the grant outlives the
+          // process, so a workspace prepared once never pays for the interpreter again.
+          confined = await confineWorkspace(cachePolicy, () => sandbox.confine([file], cachePolicy, signal))
+        }
+        if (!['full', 'partial'].includes(confined.enforcement)) return undefined
+        location = windowsCacheLocation(confined.argv)
       }
-      if (!['full', 'partial'].includes(confined.enforcement)) return undefined
-      location = windowsCacheLocation(confined.argv)
     }
   } else location ??= posixCacheLocation(key, policy.mode !== 'read-only')
   if (!location) return undefined

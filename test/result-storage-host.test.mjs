@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { createHash } from 'node:crypto'
 import Subprocess from '@deepseek-ai/dsh-subprocess-local'
 import Sandbox from '@deepseek-ai/dsh-sandbox-local'
@@ -114,6 +115,24 @@ if (process.platform !== 'win32') await test('the worker argv binds the session 
         const separator = argv.indexOf('--'), bind = argv.lastIndexOf(cacheRoot, separator)
         assert.ok(bind > 0 && argv[bind - 2] === '--bind' && argv[bind - 1] === cacheRoot && bind === separator - 1, argv.join(' '))
       }
+    } finally { await shutdown(ctx) }
+  })
+})
+
+await test('full-access first use takes a private cache directory without asking the sandbox', async () => {
+  await withTempDir('storage-full-access', async root => {
+    const { ctx } = await bootHost(), session = { id: 'full-access-first', header: { cwd: root } }
+    try {
+      // A full-access session executes unconfined by choice, so narrowing it back for a cache
+      // directory bought nothing but the directory. Any confinement call here is the regression.
+      await ctx.plugin(inner => inner.provide('sandbox', { confine() { assert.fail('full access must not confine to prepare a cache') } }))
+      const value = await resultStorage(ctx, session, undefined, WORKER, 'result', { mode: 'danger-full-access', workspaceRoot: root, sessionId: session.id }, [], false)
+      assert.ok(value, 'full access still receives result storage')
+      const info = fs.lstatSync(value.root)
+      assert.ok(info.isDirectory() && !info.isSymbolicLink(), 'the cache root is a real directory below the canonical temp root')
+      assert.equal(path.dirname(value.root), fs.realpathSync(os.tmpdir()))
+      assert.equal(value.windowsWriteSid, undefined, 'no runner-supplied temp capability is claimed')
+      await expireResultSession(ctx, session)
     } finally { await shutdown(ctx) }
   })
 })
