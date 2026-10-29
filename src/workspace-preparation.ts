@@ -24,6 +24,53 @@ function traversesReparsePoint(target: string) {
     if (parent === current) return false
   }
 }
+/**
+ * Whether a failed `sandbox.confine` is the workspace ACL prerequisite missing.
+ *
+ * The host's windows-acl rung adds a standing WRITE_OWNER grant to the workspace root, and
+ * SetNamedSecurityInfoW refuses that write (Win32 error 5, access denied) when the directory
+ * does not already carry the grant. That refusal happens before any child process starts, so the
+ * caller can prepare the ACL and retry the same call without executing anything twice.
+ *
+ * Matched on the two fields the ACL package publishes — never on message text, which is
+ * localised and would silently stop matching.
+ * @param {unknown} error - the rejection `sandbox.confine` produced.
+ * @returns {boolean} whether preparation is the repair to try.
+ */
+export function missingWriteOwner(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const fields = error as { api?: unknown; win32Code?: unknown }
+  return fields.api === 'SetNamedSecurityInfoW' && fields.win32Code === 5
+}
+/**
+ * Confine a call, preparing the workspace ACL only when confinement says it is missing.
+ *
+ * `prepareWorkspace` launches Windows PowerShell (measured 0.6–1.2 s cold on Windows 10/11), and
+ * a sandbox.confine call costs 10 ms on a directory whose grant is already in place. The grant is
+ * an ordinary ACE on the directory, so it survives the process: after the first successful
+ * preparation no host restart needs another one. Running the interpreter first therefore spent a
+ * full second per workspace per process to rewrite an ACL that was already correct — the cost a
+ * user feels as "the first session in this workspace is slow".
+ *
+ * The retry is safe because a confinement failure happens before the child is spawned: nothing
+ * ran, so nothing is executed twice. Only the ACL refusal above is repaired this way; every other
+ * confinement failure is rethrown unchanged, so an unusable rung still fails closed.
+ * @param {object} policy - the authoritative policy the call is confined under.
+ * @param {() => Promise<T>} confine - the confinement attempt, retried once after preparation.
+ * @param {object} [options] - the preparation seams the suites override.
+ * @returns {Promise<T>} the first successful result.
+ */
+export async function confineWorkspace<T>(policy: Pick<SandboxExecutionPolicy, 'mode' | 'workspaceRoot'> | undefined, confine: () => Promise<T>, options: { platform?: NodeJS.Platform; run?: (root: string) => void | Promise<void> } = {}): Promise<T> {
+  if ((options.platform ?? process.platform) !== 'win32' || policy?.mode !== 'workspace-write') return confine()
+  try {
+    return await confine()
+  }
+  catch (error) {
+    if (!missingWriteOwner(error)) throw error
+    await prepareWorkspace(policy, options)
+    return confine()
+  }
+}
 export function prepareWorkspace(policy: Pick<SandboxExecutionPolicy, 'mode' | 'workspaceRoot'> | undefined, { platform = process.platform, run = runPreparation }: { platform?: NodeJS.Platform; run?: (root: string) => void | Promise<void> } = {}): Promise<void> {
   if (platform !== 'win32' || policy?.mode !== 'workspace-write') return Promise.resolve()
   if (typeof policy.workspaceRoot !== 'string' || !path.isAbsolute(policy.workspaceRoot)) return Promise.reject(new Error('Invalid authoritative workspace root'))

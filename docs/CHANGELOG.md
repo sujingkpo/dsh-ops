@@ -21,6 +21,15 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   was the visible lag when starting one with many sessions open.
 - 新建会话时只规划新 Agent，不再重读所有存活会话的工具视图；`tools/change` 只核对它实际触达的
   Agent，宿主未标注归属的变更合并为一次处理。新建会话不再随已开会话数线性扫描工具视图。
+- Confine first on Windows and prepare the workspace ACL only when confinement reports it missing
+  (`SetNamedSecurityInfoW` / Win32 5), instead of launching Windows PowerShell before every first
+  confinement. The grant preparation writes is a standing ACE on the directory, so a workspace that
+  was prepared once — even by a previous process — no longer waits ~1 s for the interpreter; the
+  first session in a workspace, and the first after a host restart, drop from ~2.3 s to ~1.2 s.
+- Windows 上改为先 confine，只有 confinement 报 ACL 缺失（`SetNamedSecurityInfoW` / Win32 5）时才准备
+  工作区 ACL，不再在每次首次 confine 前先启动 Windows PowerShell。准备写入的是目录上的持久 ACE，
+  已准备过的工作区（哪怕是上一个进程准备的）不再为解释器等约 1 秒；每个工作区的首个会话、以及宿主
+  重启后的首个会话，从约 2.3 秒降到约 1.2 秒。
 
 ## [0.5.0] — 2026-10-27 — Preset-mode component roster
 

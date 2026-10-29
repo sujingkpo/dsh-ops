@@ -8,7 +8,7 @@ import type { WorkerStorage } from '../worker-protocol.js'
 import { workerEnvelope } from '../worker-protocol.js'
 import { CAPABILITIES } from '../capabilities/registry.js'
 import { publicToolName } from '../policy.js'
-import { prepareWorkspace } from '../workspace-preparation.js'
+import { confineWorkspace } from '../workspace-preparation.js'
 import { resultSessionNonce, registerResultCleanup } from './result-lifecycle.js'
 import type { ResultSession } from './result-lifecycle.js'
 
@@ -116,8 +116,9 @@ export async function resultStorage(ctx: StorageHost, session: ResultSession, sc
       if (!confined) {
         const sandbox = ctx.get('sandbox')
         if (!sandbox) return undefined
-        await prepareWorkspace(cachePolicy)
-        confined = await sandbox.confine([file], cachePolicy, signal)
+        // Prepare the ACL only when confinement reports it missing: the grant outlives the
+        // process, so a workspace prepared once never pays for the interpreter again.
+        confined = await confineWorkspace(cachePolicy, () => sandbox.confine([file], cachePolicy, signal))
       }
       if (!['full', 'partial'].includes(confined.enforcement)) return undefined
       location = windowsCacheLocation(confined.argv)
