@@ -23,6 +23,16 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   导致下一次 reconcile 为每个存活会话重新装配一次系统提示词——新会话渲染前要跑 N+1 次完整装配
   （实测 8 个已开会话时 2.9 秒，禁用 discovery 后 0.03 秒）。现在保留缓存裁决；观测输入变化的会话仍会重探，
   模型步与执行时的探测始终是新鲜的，所以呈现真的切成 PTC-only 时 discovery 仍会如期撤回。
+- Bound how many times one system-prompt assembly may re-enter the whole waterfall. Four hooks
+  (session-shells, ptc, discovery and publication/native) answer a stale assembly with
+  `prompt.assemble(context)`, which re-runs EVERY hook rather than continuing the current one, so they
+  re-armed each other and nested 10-18 levels deep — ~11 ms a level on every session creation.
+  A per-context budget of one re-entry keeps the freshness those hooks were written for and makes the
+  depth constant: measured nesting on session creation went from 18 levels to 1.
+- 同一次系统提示词装配最多只允许整体重入一次。四个 hook（session-shells、ptc、discovery、publication/native）
+  都用 `prompt.assemble(context)` 回应过期的装配，而它会重跑**所有** hook 而不是继续当前瀑布，于是彼此反复
+  触发，嵌套 10–18 层，每层约 11 毫秒，每次新建会话都要付。改为每个装配上下文只预算一次重入，既保留那些
+  hook 想要的新鲜度，又让层数恒定：实测新建会话时的嵌套从 18 层降到 1 层。
 - 切换离开已接入预设时撤回 PTC 发布并取消调用；保留其他会话的发现选择，外部调用仅在自有包装内授权一次。
 - 诊断所选发现/Shell 的服务与作用域发布，并说明无关预设嵌套时宿主继承祖先注册/限制的边界。
 - Plan only the new Agent on `agent/created` instead of re-reading every live session's tool

@@ -23,6 +23,7 @@ import { surfaceOf as toolSurface } from '../surface.js'
 import { onToolChange, withToolChange } from '../tool-changes.js'
 import { monitoredInvoke } from './invoke.js'
 import { scopedReconciliation, scopeFamilies } from '../scoped-reconciliation.js'
+import { mayReenterAssembly } from '../assemble-reentry.js'
 export { resolvePtcConfig } from '../config.js'
 export const name = 'dsh-ops-ptc'
 const apiTools = [...FILE_TOOLS, ...PTC_TOOLS]
@@ -291,7 +292,9 @@ export function apply(root: Context, rawConfig: unknown, gate: PtcGate = { allow
       if (!isPresentationProbe(context)) {
         const agent = context.scope as Agent, entry = entries.get(agent), before = reconciliation.version(agent)
         await entry?.ready
-        if (await reconciliation.drain(agent) || before !== reconciliation.version(agent)) return prompt.assemble(context)
+        if (await reconciliation.drain(agent) || before !== reconciliation.version(agent)) {
+          return mayReenterAssembly(context) ? prompt.assemble(context) : next()
+        }
       }
       const entry = entries.get(context.scope as Agent), heldPtc = Boolean(entry?.ptc && entry.owned.size)
       const result = await next()
@@ -300,7 +303,7 @@ export function apply(root: Context, rawConfig: unknown, gate: PtcGate = { allow
       try { entry.ptc = false; entry.surface = undefined; entry.pending.clear(); abortOwner(context.scope as Agent, 'PTC presentation withdrawn'); clear(entry) }
       finally { mutating = false }
       void reconcile(true, new Set([context.scope as Agent]))
-      return prompt.assemble(context)
+      return mayReenterAssembly(context) ? prompt.assemble(context) : result
     })
     ctx.on('session/event', (session, event) => {
       if ((event as { type: string }).type === 'agent-preset/selected') {

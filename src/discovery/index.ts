@@ -26,6 +26,7 @@ import { residentTools } from '../modes/plan.js'
 import { observeSelection } from '../integration/diagnostics.js'
 import { integrationFor } from '../integration/registry.js'
 import { enabledModes, onModesChange } from '../modes/registry.js'
+import { mayReenterAssembly } from '../assemble-reentry.js'
 
 export interface DiscoveryGate {
   allows(agent: Agent): boolean; watch?(notify: () => void): () => void; guidance?: boolean; extraGuidance?: string
@@ -338,7 +339,9 @@ export function apply(root: Context, raw: unknown, gate: DiscoveryGate = { allow
       if (!isPresentationProbe(context)) {
         const agent = context.scope as Agent, entry = entries.get(agent), before = work.version(agent)
         await entry?.ready
-        if (await work.drain(agent) || before !== work.version(agent)) return prompt.assemble(context)
+        if (await work.drain(agent) || before !== work.version(agent)) {
+          return mayReenterAssembly(context) ? prompt.assemble(context) : next()
+        }
       }
       const entry = entries.get(context.scope as Agent)
       // Snapshot ownership before yielding: another assembly may withdraw it while
@@ -351,7 +354,7 @@ export function apply(root: Context, raw: unknown, gate: DiscoveryGate = { allow
       finally { mutating = false }
       // Rebuild through the public host service after removing only our tools.
       // This cannot activate pending requests or rewrite another provider's text.
-      return prompt.assemble(context)
+      return mayReenterAssembly(context) ? prompt.assemble(context) : result
     })
     ctx.on('session/event', (session, event) => {
       if ((event as { type: string }).type === 'agent-preset/selected') {

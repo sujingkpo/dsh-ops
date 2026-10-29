@@ -7,6 +7,7 @@ import type { ShellResolution } from './shells/paths.js'
 import type { HostShellDefinition, ShellJobs, ShellResult } from './shells/types.js'
 import { errorMessage } from './shells/types.js'
 import { BASH_TOOL } from './policy.js'
+import { mayReenterAssembly } from './assemble-reentry.js'
 import { bashToolDefinition, DEFAULT_BASH_TIMEOUT_MS } from './shells.js'
 import { BashArgumentError } from './shells/argument-error.js'
 import { MODES } from './permissions.js'
@@ -290,7 +291,7 @@ export function mountSessionBash(ctx: Context, config: Pick<ResolvedConfig, 'pub
       if (!pending) return next()
       while (pending) await pending
       // Schemas were collected before this hook. Rebuild after publication.
-      return prompt.assemble(options)
+      return mayReenterAssembly(options) ? prompt.assemble(options) : next()
     })
   })
   ctx.on('session/event', (_session, event) => {

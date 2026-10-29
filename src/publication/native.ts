@@ -14,6 +14,7 @@ import type { ResolvedConfig } from '../config.js'
 import { ownScopes } from '../scoped-ownership.js'
 import { failure } from '../file/worker.js'
 import type { PublicationGate } from './types.js'
+import { mayReenterAssembly } from '../assemble-reentry.js'
 
 type ResidentName = Parameters<NativeFileTools['definition']>[0]
 
@@ -123,7 +124,7 @@ export function mountNative(root: Context, config: ResolvedConfig, publication: 
         if (!allowed) detach(agent)
         else attach(agent)
         if (entries.has(agent)) await entries.get(agent)?.ready
-        return prompt.assemble(context)
+        return mayReenterAssembly(context) ? prompt.assemble(context) : result
       }
       return result
     })
