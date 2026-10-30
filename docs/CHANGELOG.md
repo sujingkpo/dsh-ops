@@ -9,6 +9,18 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- Reuse one presentation assembly across the discovery and PTC rows. Both rows must decide "is this
+  Agent's presentation ptc-only?", and each ran its own full `prompt.assemble` during session
+  creation. A cold assembly renders the entire tool SDK document (one `jsonSchemaToTs` pass over every
+  tool schema) and costs ~1.3 s at ~150 tools, so creating one session paid it twice, synchronously,
+  before the host could finish creating the session (measured 3.4 s / 3.9 s wall, a single 3.4 s
+  event-loop block). The verdict is now shared per Agent through a memo keyed by a cheap signature
+  (visible tool names + cwd + mode); both rows still re-probe once the surface actually changes.
+- 同一次呈现装配在 discovery 与 PTC 两行之间复用。两行都要判断「该会话的呈现是不是 ptc-only」，
+  以前各自在会话创建时跑一次完整 `prompt.assemble`。冷装配要渲染整份工具 SDK 文档（对每个工具 schema
+  跑一遍 `jsonSchemaToTs`），约 150 个工具时约 1.3 秒，于是新建一个会话要白付两次，而且是同步的、
+  发生在宿主建完会话之前（实测 3.4/3.9 秒，单次 3.4 秒的主线程阻塞）。现在两行共用一份按会话缓存、
+  以廉价签名（可见工具名 + cwd + 模式）为键的判定；表面真的变化时两行仍会重新探测。
 - Withdraw PTC publication and cancel calls when a session leaves its selected preset; keep other
   sessions' discovery selections intact and authorize external calls only in their owned wrapper.
 - Diagnose the selected discovery/shell services and scoped publication; clarify the host's

@@ -9,7 +9,8 @@ import { nativeProviders, registerNativeProviderAtScope, claimNativeSelection } 
 import { loadScopes } from '../adapter/dsh/host.js'
 import { onToolChange } from '../tool-changes.js'
 import { ownScopes } from '../scoped-ownership.js'
-import { isNativePresentation, isPresentationProbe } from '../presentation.js'
+import { isNativePresentation, isPresentationProbe, inspectPresentationShared, forgetPresentation } from '../presentation.js'
+import { visibleNames } from '../surface.js'
 import { mountResultLifecycle } from '../kernel/result-lifecycle.js'
 import { failure, resolveWorker } from '../file/worker.js'
 import { capability, DISCOVERY_TOOL_NAME } from '../capabilities/registry.js'
@@ -108,12 +109,26 @@ export function apply(root: Context, raw: unknown, gate: DiscoveryGate = { allow
       try { return provider.active && provider.capability.available?.(agent) !== false } catch { return false }
     }
     const ptcOnly = (assembly: PromptAssembly): boolean => assembly.sections.some(section => section.name === 'tools:ptc-only' && Boolean(section.text.trim()))
-    const invalidate = (entry: Entry) => { ++entry.revision; entry.presentation = undefined }
+    // 反向索引：让 invalidate（只拿到 entry）也能清掉按 Agent 记的共享装配缓存。
+    const entryAgents = new WeakMap<Entry, Agent>()
+    const invalidate = (entry: Entry) => {
+      ++entry.revision
+      entry.presentation = undefined
+      const owner = entryAgents.get(entry)
+      if (owner) { forgetPresentation(owner) }
+    }
     const inputs = (agent: Agent): unknown[] => {
       const policy = policyService?.resolve({ session: agent.session })
       return [agent.ctx, agent.session, agent.session.header.cwd, policy?.mode, policy?.workspaceRoot, policy?.sessionId]
     }
     const same = (left: unknown[], right: unknown[]) => left.length === right.length && left.every((value, index) => value === right[index])
+    // 复用装配判定的廉价签名：可见工具名 + 沙箱模式。任一变化都会让共享缓存失效。
+    const presentationSignature = (agent: Agent): string => {
+      try {
+        const policy = policyService?.resolve({ session: agent.session })
+        return [agent.session.header.cwd, (agent.session as unknown as { mode?: string }).mode, policy?.mode, policy?.workspaceRoot, policy?.sessionId, visibleNames(tools, agent).join('\u0001')].join('|')
+      } catch { return 'unavailable:' + String(Date.now()) + Math.random() }
+    }
     // Only background reconciliation reuses a probe. A step or execution can
     // observe arbitrary dynamic prompt providers with no registry notification.
     const native = async (agent: Agent, fresh = false, signal?: AbortSignal): Promise<boolean> => {
@@ -122,7 +137,11 @@ export function apply(root: Context, raw: unknown, gate: DiscoveryGate = { allow
       if (fresh) invalidate(entry)
       const current = inputs(agent), revision = entry.revision
       if (entry.presentation && same(entry.presentation.inputs, current)) return entry.presentation.native
-      const result = await isNativePresentation(prompt, agent, signal)
+      // fresh（每步执行前）必须重测；后台 reconcile 复用与 PTC 行共享的同一次装配，
+      // 避免一次会话创建里把整套工具 SDK 文档渲染两遍。
+      const result = fresh
+        ? await isNativePresentation(prompt, agent, signal)
+        : !ptcOnly(await inspectPresentationShared(prompt, agent, presentationSignature(agent), signal))
       if (!stopped && !signal?.aborted && entries.get(agent) === entry && revision === entry.revision && same(current, inputs(agent))) {
         entry.presentation = { inputs: current, native: result }
       }
@@ -251,6 +270,7 @@ export function apply(root: Context, raw: unknown, gate: DiscoveryGate = { allow
       const entry: Entry = { runtime: new NativeFileTools({ ctx, config: { ...config, required: Boolean(worker) && config.required, workerPath: worker }, report: undefined }),
         selected: new Set(), pending: new Set(), externalSelected: new Set(), externalPending: new Set(), disposers: [], owned: new Set(), ready: Promise.resolve(), revision: 0 }
       entry.releaseObservation = observeSelection(ctx, agent, entry.externalPending)
+      entryAgents.set(entry, agent)
       entries.set(agent, entry); ownership?.track(agent)
       entry.fiber = agent.ctx.plugin({ inject: ['tools'], apply(scoped) { entry.ctx = scoped } })
       entry.ready = Promise.resolve(entry.fiber).then(async () => { await entry.runtime.start([]); await reconcile([agent]) })

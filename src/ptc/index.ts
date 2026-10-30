@@ -5,7 +5,7 @@ import type { ToolDefinition, ToolRunContext } from '../adapter/dsh/types.js'
 import type {} from '../adapter/dsh/types.js'
 import type { PromptAssembly } from '../adapter/dsh/types.js'
 import { loadScopes } from '../adapter/dsh/host.js'
-import { inspectPresentation, isPresentationProbe } from '../presentation.js'
+import { inspectPresentation, isPresentationProbe, inspectPresentationShared, forgetPresentation } from '../presentation.js'
 import { WORKER_TIMEOUT_MS } from '../worker-protocol.js'
 import { FILE_TOOLS, PTC_TOOLS } from '../capabilities/registry.js'
 import { PTC_SECTION, definition } from './contract.js'
@@ -19,7 +19,7 @@ import { PTC_RESIDENT_TOOLS } from './config.js'
 import type { ApiName } from './config.js'
 import { sdkDefinition, requestedApis } from './sdk.js'
 import { ownPtcScopes } from './ownership.js'
-import { surfaceOf as toolSurface } from '../surface.js'
+import { surfaceOf as toolSurface, visibleNames } from '../surface.js'
 import { onToolChange, withToolChange } from '../tool-changes.js'
 import { monitoredInvoke } from './invoke.js'
 import { scopedReconciliation, scopeFamilies } from '../scoped-reconciliation.js'
@@ -86,11 +86,20 @@ export function apply(root: Context, rawConfig: unknown, gate: PtcGate = { allow
     const clear = (entry: Entry) => {
       entry.published = undefined
       entry.owned.clear()
+      forgetPresentation(entry.agent)
       for (const dispose of entry.disposers.splice(0)) {
         try { withToolChange([entry.agent], dispose) } catch (error) { ctx.logger.warn('dsh-ops: PTC teardown failed; continuing:', error) }
       }
     }
-    const ptcOnly = async (agent: Agent, signal?: AbortSignal): Promise<boolean> => Boolean(ctx.get('ptcRuntime')) && isPtc(await inspectPresentation(prompt, agent, signal))
+    // 复用装配判定的廉价签名：可见工具名 + 沙箱模式；任一变化都会让共享缓存失效。
+    const presentationSignature = (agent: Agent): string => {
+      try {
+        const policy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
+        return [agent.session.header.cwd, (agent.session as unknown as { mode?: string }).mode, policy?.mode, policy?.workspaceRoot, policy?.sessionId, visibleNames(tools, agent).join('\u0001')].join('|')
+      } catch { return 'unavailable:' + String(Date.now()) + Math.random() }
+    }
+    // 与 discovery 行共享同一次完整装配；否则一次会话创建会把工具 SDK 文档渲染两遍。
+    const ptcOnly = async (agent: Agent, signal?: AbortSignal): Promise<boolean> => Boolean(ctx.get('ptcRuntime')) && isPtc(await inspectPresentationShared(prompt, agent, presentationSignature(agent), signal))
     const abortOwner = (agent: Agent, reason: string) => {
       for (const [controller, work] of active) if (work.owner === agent) controller.abort(new Error(reason))
     }
