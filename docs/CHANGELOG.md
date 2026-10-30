@@ -21,6 +21,15 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   跑一遍 `jsonSchemaToTs`），约 150 个工具时约 1.3 秒，于是新建一个会话要白付两次，而且是同步的、
   发生在宿主建完会话之前（实测 3.4/3.9 秒，单次 3.4 秒的主线程阻塞）。现在两行共用一份按会话缓存、
   以廉价签名（可见工具名 + cwd + 模式）为键的判定；表面真的变化时两行仍会重新探测。
+- Skip the presentation probe entirely for a pure-PTC session. When the row owns mode `ptc`, an
+  allowed Agent's presentation is necessarily ptc-only, so discovery and PTC no longer assemble the
+  system prompt just to learn that. The probe (and its cold tool-SDK render) now only runs for modes
+  that can actually change it, so creating a session no longer pays a full assembly before it can
+  render. Measured new-session create-to-persist: 3.9 s → 2.4 s (shared verdict) → under 1 s.
+- 纯 PTC 会话直接省掉呈现探测。本行拥有 `ptc` 模式时，被允许的会话呈现必然是 ptc-only，
+  discovery 与 PTC 不必为了得知这一点去完整装配一次系统提示词。只有真正可能改变呈现的模式才走
+  探测（及其冷渲染工具 SDK 的开销），于是新建会话在渲染前不再付一次完整装配。实测新建会话
+  「创建→落盘」：3.9 秒 → 2.4 秒（共享裁决）→ 1 秒以内。
 - Withdraw PTC publication and cancel calls when a session leaves its selected preset; keep other
   sessions' discovery selections intact and authorize external calls only in their owned wrapper.
 - Diagnose the selected discovery/shell services and scoped publication; clarify the host's

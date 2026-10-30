@@ -55,6 +55,6 @@ export function applyMode(root: Context, rawConfig: unknown, mode: ModeId): void
     mountPtc(root, {
       binaryPath: config.binaryPath, required: config.required,
       allowedTools: config.allowedTools, alwaysLoaded: config.alwaysLoaded,
-    }, { allows: matches, watch })
+    }, { allows: matches, watch, pure: mode === 'ptc' })
   }
 }

@@ -19,7 +19,7 @@ import { PTC_RESIDENT_TOOLS } from './config.js'
 import type { ApiName } from './config.js'
 import { sdkDefinition, requestedApis } from './sdk.js'
 import { ownPtcScopes } from './ownership.js'
-import { surfaceOf as toolSurface, visibleNames } from '../surface.js'
+import { surfaceOf as toolSurface } from '../surface.js'
 import { onToolChange, withToolChange } from '../tool-changes.js'
 import { monitoredInvoke } from './invoke.js'
 import { scopedReconciliation, scopeFamilies } from '../scoped-reconciliation.js'
@@ -61,6 +61,8 @@ export interface PtcGate {
   allows(agent: Agent): boolean
   /** Subscribe to gate changes; the callback runs a full reconcile. */
   watch?(notify: () => void): () => void
+  /** The row owns a pure PTC mode, so every allowed Agent is ptc-only without probing. */
+  pure?: boolean
 }
 
 export function apply(root: Context, rawConfig: unknown, gate: PtcGate = { allows: () => true }): void {
@@ -91,15 +93,13 @@ export function apply(root: Context, rawConfig: unknown, gate: PtcGate = { allow
         try { withToolChange([entry.agent], dispose) } catch (error) { ctx.logger.warn('dsh-ops: PTC teardown failed; continuing:', error) }
       }
     }
-    // 复用装配判定的廉价签名：可见工具名 + 沙箱模式；任一变化都会让共享缓存失效。
-    const presentationSignature = (agent: Agent): string => {
-      try {
-        const policy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
-        return [agent.session.header.cwd, (agent.session as unknown as { mode?: string }).mode, policy?.mode, policy?.workspaceRoot, policy?.sessionId, visibleNames(tools, agent).join('\u0001')].join('|')
-      } catch { return 'unavailable:' + String(Date.now()) + Math.random() }
+    const ptcOnly = async (agent: Agent, signal?: AbortSignal): Promise<boolean> => {
+      if (!ctx.get('ptcRuntime')) { return false }
+      // 本行拥有的是纯 PTC 模式时，被允许的会话必然是 ptc 呈现，无需为判定跑一次
+      // 完整装配（冷装配约 1.3s，且压在会话创建的关键路径上）。其它模式仍走装配判定。
+      if (gate.pure === true && gate.allows(agent)) { return true }
+      return isPtc(await inspectPresentation(prompt, agent, signal))
     }
-    // 与 discovery 行共享同一次完整装配；否则一次会话创建会把工具 SDK 文档渲染两遍。
-    const ptcOnly = async (agent: Agent, signal?: AbortSignal): Promise<boolean> => Boolean(ctx.get('ptcRuntime')) && isPtc(await inspectPresentationShared(prompt, agent, presentationSignature(agent), signal))
     const abortOwner = (agent: Agent, reason: string) => {
       for (const [controller, work] of active) if (work.owner === agent) controller.abort(new Error(reason))
     }

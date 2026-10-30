@@ -135,6 +135,13 @@ export function apply(root: Context, raw: unknown, gate: DiscoveryGate = { allow
       const entry = entries.get(agent)
       if (!entry || !gate.allows(agent)) return false
       if (fresh) invalidate(entry)
+      // ptc 模式行启用的会话，其呈现必然是 ptc-only：直接判定，不必为它跑一次完整
+      // 装配（冷装配要渲染整份工具 SDK 文档，约 1.3s，且正好压在会话创建的关键路径上）。
+      // 其它模式或未 join 模式时仍走装配判定，保留对动态 section 的兼容。
+      if (modeOf(ctx, agent) === 'ptc' && enabledModes(ctx).has('ptc')) {
+        entry.presentation = { inputs: inputs(agent), native: false }
+        return false
+      }
       const current = inputs(agent), revision = entry.revision
       if (entry.presentation && same(entry.presentation.inputs, current)) return entry.presentation.native
       // fresh（每步执行前）必须重测；后台 reconcile 复用与 PTC 行共享的同一次装配，
