@@ -10,6 +10,7 @@ import { mountPtc } from '../publication/ptc.js'
 import { NATIVE_RESIDENT_RAW } from '../capabilities/profiles.js'
 import { BASH_TOOL, publicToolName } from '../policy.js'
 import { BASH_PROMPT_SECTION, renderBashGuidance } from '../shells/prompt.js'
+import { mountJobWaitGuidance } from '../shells/job-wait-guidance.js'
 import type { ConsumerPlan } from './types.js'
 
 export function mountConsumer(ctx: Context, plan: ConsumerPlan): void {
@@ -21,6 +22,7 @@ export function mountConsumer(ctx: Context, plan: ConsumerPlan): void {
     const shells = resolveShells(core)
     ctx.inject(['tools'], inner => mountSessionBash(inner, core, shells, gate))
     if (core.promptPolicy) ctx.inject(['tools', 'systemPrompt'], inner => {
+      mountJobWaitGuidance(inner, plan.id, gate)
       let active = true
       inner.effect(() => () => { active = false }, 'dsh-ops: Bash guidance lifetime')
       renderShellGuidance = agent => {
@@ -43,7 +45,7 @@ export function mountConsumer(ctx: Context, plan: ConsumerPlan): void {
     if (plan.discovery || plan.native.alwaysLoaded.length || plan.external.allowed.length) mountDiscovery(ctx,
       { ...plan.native, enabled: plan.discovery }, { ...gate, guidance: core.promptPolicy, extraGuidance: core.extraGuidance,
         extraGuidanceOwner: agent => shellOwnsGuidance(agent) || nativeOwnsGuidance(agent),
-        residentTools: () => residents.map(publicToolName), external: plan.external, purePtc: () => plan.id === 'ptc' })
-  } else if (plan.files) mountPtc(ctx, plan.ptc, { ...gate, guidance: core.promptPolicy, resident: plan.residentTools, dynamic: plan.discovery, pure: plan.id === 'ptc' })
+        residentTools: () => residents.map(publicToolName), external: plan.external })
+  } else if (plan.files) mountPtc(ctx, plan.ptc, { ...gate, guidance: core.promptPolicy, resident: plan.residentTools, dynamic: plan.discovery })
   if (plan.replaceOfficial) mountReplacements(ctx, { id: plan.id, targets: plan.replacementTargets, gate, keepOfficial: () => false })
 }

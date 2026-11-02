@@ -5,12 +5,11 @@ import type { PromptAssembly } from '../adapter/dsh/types.js'
 import type {} from '../adapter/dsh/types.js'
 import { resolveDiscoveryConfig } from '../config.js'
 import { NativeFileTools } from '../projections/native/runtime.js'
-import { nativeProviders, registerNativeProviderAtScope, claimNativeSelection } from '../publication/providers.js'
+import { nativeProviders, registerNativeProviderAtScope, claimNativeSelection, ptcSurfaceClaimed } from '../publication/providers.js'
 import { loadScopes } from '../adapter/dsh/host.js'
 import { onToolChange } from '../publication/changes.js'
 import { ownScopes } from '../publication/ownership.js'
-import { isNativePresentation, isPresentationProbe, inspectPresentationShared, forgetPresentation } from '../publication/presentation.js'
-import { visibleNames } from '../publication/surface.js'
+import { claimPresentationRebuild, inPresentationProbe, isNativePresentation, isPresentationProbe } from '../publication/presentation.js'
 import { mountResultLifecycle } from '../kernel/result-lifecycle.js'
 import { failure, resolveWorker } from '../execution/files.js'
 import { capability, DISCOVERY_TOOL_NAME } from '../capabilities/registry.js'
@@ -26,15 +25,12 @@ import { parseRequest } from './search.js'
 import { InvocationLifetime, InvocationNotStarted } from '../lifecycle/invocations.js'
 import { observeSelection } from './observations.js'
 import { scopedReconciliation, scopeFamilies } from '../publication/reconciliation.js'
-import { mayReenterAssembly } from '../assemble-reentry.js'
 
 export interface DiscoveryGate {
   allows(agent: Agent): boolean; watch?(notify: () => void): () => void; guidance?: boolean; extraGuidance?: string
   /** True only when this agent's assembled prompt has another live section owning this guidance. */
   extraGuidanceOwner?(agent: Agent): boolean
   residentTools?(agent: Agent): ReadonlySet<string> | readonly string[]
-  /** True when every allowed Agent is ptc-only without an assembly (a pure PTC row). */
-  purePtc?(agent: Agent): boolean
   external?: { allowed: readonly string[]; alwaysLoaded: readonly string[]; disabled: readonly string[] }
 }
 interface Entry {
@@ -78,6 +74,48 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
     let ownership: Awaited<ReturnType<typeof ownScopes>> | undefined
     let stopped = false, mutating = false
     const work = scopedReconciliation<Agent>(() => ctx.logger.warn('dsh-ops: discovery publication unavailable; tools remain withdrawn.'))
+    // A change our own assembly caused is not news. Applying it inline is what
+    // turns one external notification into a storm of reassemblies: the probe
+    // assembly notifies us, we probe again, and the next assembly notifies us
+    // again. Probes are attributed by depth (assembly handlers may nest one),
+    // and each external activation may spend at most one trailing reconcile.
+    let deferred = 0, settleBudget = 1, warnedFeedback = false
+    function notified(): boolean {
+      if (!inPresentationProbe()) return false
+      ++deferred
+      return true
+    }
+    // Synchronous on purpose: an awaited assembly must observe that the previous
+    // reconciliation was superseded before it can read a stale publication.
+    function revalidate(): void {
+      for (const entry of entries.values()) invalidate(entry)
+      void reconcile()
+    }
+    function settle(): void {
+      if (!deferred || stopped || inPresentationProbe()) return
+      deferred = 0
+      if (settleBudget <= 0) {
+        if (!warnedFeedback) {
+          warnedFeedback = true
+          ctx.logger.warn('dsh-ops: a component changed the tool or prompt registry during prompt assembly; that change was ignored to stop a feedback loop.')
+        }
+        return
+      }
+      --settleBudget
+      revalidate()
+    }
+    // A genuine external change re-arms the budget and drops any attribution
+    // left over from a probe that never returned to this controller.
+    function external(): void {
+      deferred = 0
+      settleBudget = 1
+    }
+    function refresh(): void {
+      if (stopped) return
+      if (notified()) return
+      external()
+      revalidate()
+    }
     const cancelEntry = (entry: Entry, reason: string) => {
       entry.calls.cancel(reason)
       entry.runtime.cancel(reason)
@@ -117,46 +155,35 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
     const catalog = (agent: Agent, callable: ReadonlySet<string>) => nativeCatalog(
       config.allowedTools.filter(tool => selectable(agent, tool)), externalDiscoverable(agent), callable)
     const ptcOnly = (assembly: PromptAssembly): boolean => assembly.sections.some(section => section.name === 'tools:ptc-only' && Boolean(section.text.trim()))
-    // 反向索引：让 invalidate（只拿到 entry）也能清掉按 Agent 记的共享装配缓存。
-    const entryAgents = new WeakMap<Entry, Agent>()
-    const invalidate = (entry: Entry) => {
-      ++entry.revision
-      entry.presentation = undefined
-      const owner = entryAgents.get(entry)
-      if (owner) { forgetPresentation(owner) }
-    }
+    const invalidate = (entry: Entry) => { ++entry.revision; entry.presentation = undefined }
+    // A session this component can actually coordinate: it has a scope context, this
+    // component owns it, and its mode keeps discovery tools in play. Both the
+    // reconcile loop and the unattributed branch must agree on it — a representative
+    // that reconcile would filter out leaves the "at least one probe" contract
+    // silently degraded to zero probes.
+    const coordinable = (agent: Agent, entry: Entry | undefined): boolean =>
+      Boolean(entry?.ctx && ownership?.owns(agent) && (externalEnabled ? gate.allows(agent) : permitted(agent)))
     const inputs = (agent: Agent): unknown[] => {
       const policy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
       return [agent.ctx, agent.session, currentSessionDirectory(ctx, agent), policy?.mode, policy?.workspaceRoot, policy?.sessionId]
     }
     const same = (left: unknown[], right: unknown[]) => left.length === right.length && left.every((value, index) => value === right[index])
-    // 复用装配判定的廉价签名：可见工具名 + 沙箱模式。任一变化都会让共享缓存失效。
-    const presentationSignature = (agent: Agent): string => {
-      try {
-        const policy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
-        return [currentSessionDirectory(ctx, agent), (agent.session as unknown as { mode?: string }).mode, policy?.mode, policy?.workspaceRoot, policy?.sessionId, visibleNames(tools, agent).join('\u0001')].join('|')
-      } catch { return 'unavailable:' + String(Date.now()) + Math.random() }
-    }
     // Only background reconciliation reuses a probe. A step or execution can
     // observe arbitrary dynamic prompt providers with no registry notification.
     const native = async (agent: Agent, fresh = false, signal?: AbortSignal): Promise<boolean> => {
       const entry = entries.get(agent)
       if (!entry || !gate.allows(agent)) return false
       if (fresh) invalidate(entry)
-      // ptc 模式行启用的会话，其呈现必然是 ptc-only：直接判定，不必为它跑一次完整
-      // 装配（冷装配要渲染整份工具 SDK 文档，约 1.3s，且正好压在会话创建的关键路径上）。
-      // 其它模式或未 join 模式时仍走装配判定，保留对动态 section 的兼容。
-      if (gate.purePtc?.(agent)) {
-        entry.presentation = { inputs: inputs(agent), native: false }
-        return false
-      }
+      // An exact PTC claim already excludes Native tools. Publication changes
+      // cannot turn that claim into a Native presentation; only a fresh probe
+      // may re-admit discovery after an unannounced dynamic-provider change.
+      if (!fresh && ptcSurfaceClaimed(ctx, agent)) return false
       const current = inputs(agent), revision = entry.revision
       if (entry.presentation && same(entry.presentation.inputs, current)) return entry.presentation.native
-      // fresh（每步执行前）必须重测；后台 reconcile 复用与 PTC 行共享的同一次装配，
-      // 避免一次会话创建里把整套工具 SDK 文档渲染两遍。
-      const result = fresh
-        ? await isNativePresentation(prompt, agent, signal)
-        : !ptcOnly(await inspectPresentationShared(prompt, agent, presentationSignature(agent), signal))
+      let result: boolean
+      try {
+        result = await isNativePresentation(prompt, agent, signal)
+      } finally { settle() }
       if (!stopped && !signal?.aborted && entries.get(agent) === entry && revision === entry.revision && same(current, inputs(agent))) {
         entry.presentation = { inputs: current, native: result }
       }
@@ -198,7 +225,7 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
         for (const agent of family) {
           if (stopped || !task.current()) return
           const entry = entries.get(agent)
-          if (entry?.ctx && ownership?.owns(agent) && (externalEnabled ? gate.allows(agent) : permitted(agent)) && await task.wait(native(agent, false, task.signal)).catch(() => false)) ready.add(agent)
+          if (coordinable(agent, entry) && await task.wait(native(agent, false, task.signal)).catch(() => false)) ready.add(agent)
         }
         if (stopped || !task.current()) return
         mutating = true; ownership?.begin()
@@ -288,7 +315,6 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
       const entry: Entry = { runtime: new NativeFileTools({ ctx, config: { ...config, required: Boolean(worker) && config.required, workerPath: worker }, report: undefined }),
         calls: new InvocationLifetime(), selected: new Set(), pending: new Set(), externalSelected: new Set(), externalPending: new Set(), disposers: [], owned: new Set(), ready: Promise.resolve(), revision: 0 }
       entry.releaseObservation = observeSelection(ctx, agent, entry.externalPending)
-      entryAgents.set(entry, agent)
       entries.set(agent, entry); ownership?.track(agent)
       entry.fiber = agent.ctx.plugin({ inject: ['tools'], apply(scoped) { entry.ctx = scoped } })
       entry.ready = Promise.resolve(entry.fiber).then(async () => { await entry.runtime.start([]); await reconcile([agent]) })
@@ -316,10 +342,36 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
       try { clear(entry); entry.releaseSelection?.() } finally { mutating = false }
       await Promise.allSettled([entry.runtime.stop(), retireExternal(entry)]); await entry.fiber?.dispose(); await reconcile(affected)
     })
-    const refresh = () => {
+    // A prompt-driven change can move any scope's presentation, but paying one
+    // synchronous assembly per live session is what made session creation scale
+    // with the live count. Probe a single representative — the conservative
+    // contract is "at least one probe", not "every session" — and leave the rest
+    // stale: each re-observes its presentation at its next real assembly, and a
+    // tool call still re-probes before executing (`native(agent, true, ...)`).
+    // Publication-set changes (modes, runtime, configuration) keep using
+    // `refresh`, which must visit every entry to withdraw stale registrations.
+    const staleAll = () => {
       if (stopped) return
-      for (const entry of entries.values()) invalidate(entry)
-      void reconcile()
+      if (notified()) return
+      external()
+      const representative = [...entries].find(([agent, entry]) => coordinable(agent, entry))
+      if (!representative) {
+        // Nothing here can be probed, so `reconcile` would walk every entry only to skip
+        // each one. Withdrawing stale registrations is `refresh`'s job on a publication-set
+        // change; a presentation hint carries no authority to withdraw anything.
+        for (const entry of entries.values()) invalidate(entry)
+        return
+      }
+      // Invalidate the representative alone first. `reconcile` runs its body on a
+      // later microtask and walks the representative's whole scope family; clearing
+      // the siblings here would empty their caches before that walk starts and the
+      // family would be re-probed member by member. The siblings keep their cached
+      // verdict for this round, then go stale below once the probe has run.
+      invalidate(representative[1])
+      void reconcile([representative[0]]).finally(() => {
+        if (stopped) return
+        for (const [agent, entry] of entries) if (agent !== representative[0]) invalidate(entry)
+      })
     }
     ;({ scopeChainOf } = await loadScopes())
     if (externalEnabled) {
@@ -337,17 +389,23 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
         refresh()
       }), 'dsh-ops: external provider lifecycle')
     }
-    onToolChange(ctx, scopes => {
-      if (mutating || ownership?.publishing()) return
-      // An unattributed change cannot be narrowed to a scope. Dropping every probe here
-      // makes the next reconcile re-assemble the prompt once per live Agent, so creating
-      // one session costs N+1 full assemblies and the click waits for all of them. Keep
-      // the cached verdicts and reconcile instead: agents whose observed inputs changed
-      // still re-probe, and the step/execution probes (always fresh) remain the authority
-      // on whether discovery may publish at all.
-      if (!scopes?.length) { void reconcile(); return }
+    onToolChange(ctx, (scopes, origin) => {
+      if (mutating || ownership?.publishing() || notified()) return
+      if (!scopes?.length) { staleAll(); return }
+      external()
       const affected = new Set<Agent>()
       for (const [agent, entry] of entries) if (scopes.some(scope => scopeChainOf(agent).includes(scope))) { invalidate(entry); affected.add(agent) }
+      if (!affected.size) {
+        // This package's own window named a scope it knows is unrelated to every
+        // tracked session — a sibling row's registration. It cannot have moved this
+        // row's verdicts, so leaving the cache intact is the whole point of the
+        // attribution. A scope the HOST named that sits on no tracked chain is the
+        // opposite case: host state this row has not admitted yet, which may already
+        // have changed the registry, so it takes the conservative path.
+        if (origin !== 'host') return
+        staleAll()
+        return
+      }
       void reconcile(affected)
     })
     if (externalEnabled) {
@@ -355,7 +413,8 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
         refresh(); inner.effect(() => () => refresh())
       })
     }
-    ctx.on('system-prompt/change', refresh)
+    // A prompt change moves presentation only, so it takes the lazy path.
+    ctx.on('system-prompt/change', staleAll)
     // A mode row toggling changes which capabilities stay resident and therefore
     // must leave the discovery pool.
     if (gate.watch) ctx.effect(() => gate.watch!(refresh), 'dsh-ops: discovery integration observer')
@@ -376,9 +435,7 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
       if (!isPresentationProbe(context)) {
         const agent = context.scope as Agent, entry = entries.get(agent), before = work.version(agent)
         await entry?.ready
-        if (await work.drain(agent) || before !== work.version(agent)) {
-          return mayReenterAssembly(context, 'discovery') ? prompt.assemble(context) : next()
-        }
+        if (await work.drain(agent) || before !== work.version(agent)) return prompt.assemble(context)
       }
       const entry = entries.get(context.scope as Agent)
       // Snapshot ownership before yielding: another assembly may withdraw it while
@@ -389,9 +446,12 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
       mutating = true
       try { cancelEntry(entry, 'Native presentation withdrawn'); clear(entry) }
       finally { mutating = false }
+      // The withdrawal already settled this probe's verdict. Its stale tool list
+      // is private to the inspection; only a public assembly needs rebuilding.
+      if (isPresentationProbe(context)) return result
       // Rebuild through the public host service after removing only our tools.
       // This cannot activate pending requests or rewrite another provider's text.
-      return mayReenterAssembly(context, 'discovery') ? prompt.assemble(context) : result
+      return claimPresentationRebuild(context) ? prompt.assemble(context) : result
     })
     ctx.on('session/event', (session, event) => {
       if ((event as { type: string }).type === 'agent-preset/selected') {
