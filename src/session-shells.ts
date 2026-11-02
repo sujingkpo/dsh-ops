@@ -14,6 +14,7 @@ import { hostBashDefinition } from './shells/host-tool.js'
 import { withToolChange } from './publication/changes.js'
 import { startSessionBash } from './shells/session-execution.js'
 import { resolveSessionDirectory } from './adapter/dsh/working-directory.js'
+import { mayReenterAssembly } from './assemble-reentry.js'
 
 /**
  * Whether a session workspace is written in a Windows form.
@@ -294,7 +295,7 @@ export function mountSessionBash(ctx: Context, config: Pick<ResolvedConfig, 'pub
       if (!pending) return next()
       while (pending) await pending
       // Schemas were collected before this hook. Rebuild after publication.
-      return prompt.assemble(options)
+      return mayReenterAssembly(options, 'session-shells') ? prompt.assemble(options) : next()
     })
   })
   ctx.on('session/event', (_session, event) => {

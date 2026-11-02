@@ -5,7 +5,7 @@ import type { ToolDefinition, ToolRunContext } from '../adapter/dsh/types.js'
 import type {} from '../adapter/dsh/types.js'
 import type { PromptAssembly } from '../adapter/dsh/types.js'
 import { loadScopes } from '../adapter/dsh/host.js'
-import { inspectPresentation, isPresentationProbe } from './presentation.js'
+import { inspectPresentation, isPresentationProbe, forgetPresentation } from './presentation.js'
 import { InvocationLifetime, InvocationNotStarted } from '../lifecycle/invocations.js'
 import { WORKER_TIMEOUT_MS } from '../execution/protocol.js'
 import { FILE_TOOLS, PTC_TOOLS, capability } from '../capabilities/registry.js'
@@ -26,6 +26,7 @@ import { onToolChange, withToolChange } from './changes.js'
 import { monitoredInvoke } from '../execution/monitored.js'
 import { scopedReconciliation, scopeFamilies } from './reconciliation.js'
 import { retired as retiredLegacyRow } from '../settings/legacy.js'
+import { mayReenterAssembly } from '../assemble-reentry.js'
 export { resolvePtcConfig } from '../config.js'
 export const name = 'dsh-ops-ptc'
 const apiTools = [...FILE_TOOLS, ...PTC_TOOLS]
@@ -62,6 +63,8 @@ export interface PtcGate {
   resident?: boolean
   /** Whether advanced SDK selection is enabled. */
   dynamic?: boolean
+  /** The row owns a pure PTC mode, so every allowed Agent is ptc-only without probing. */
+  pure?: boolean
   /** Whether the row owns this Agent's mode. */
   allows(agent: Agent): boolean
   /** Subscribe to gate changes; the callback runs a full reconcile. */
@@ -100,11 +103,16 @@ export function mountPtc(root: Context, rawConfig: unknown, gate: PtcGate = { al
     const clear = (entry: Entry) => {
       entry.published = undefined
       entry.owned.clear()
+      forgetPresentation(entry.agent)
       for (const dispose of entry.disposers.splice(0)) {
         try { withToolChange([entry.agent], dispose) } catch (error) { ctx.logger.warn('dsh-ops: PTC teardown failed; continuing:', error) }
       }
     }
-    const ptcOnly = async (agent: Agent, signal?: AbortSignal): Promise<boolean> => Boolean(ctx.get('ptcRuntime')) && isPtc(await inspectPresentation(prompt, agent, signal))
+    const ptcOnly = async (agent: Agent, signal?: AbortSignal): Promise<boolean> => {
+      // A pure PTC mode owns every allowed Agent; never assemble just to learn that.
+      if (gate.pure === true && gate.allows(agent)) return true
+      return Boolean(ctx.get('ptcRuntime')) && isPtc(await inspectPresentation(prompt, agent, signal))
+    }
     const abortOwner = (agent: Agent, reason: string) => {
       entries.get(agent)?.calls.cancel(reason)
     }
@@ -315,7 +323,9 @@ export function mountPtc(root: Context, rawConfig: unknown, gate: PtcGate = { al
       if (!isPresentationProbe(context)) {
         const agent = context.scope as Agent, entry = entries.get(agent), before = reconciliation.version(agent)
         await entry?.ready
-        if (await reconciliation.drain(agent) || before !== reconciliation.version(agent)) return prompt.assemble(context)
+        if (await reconciliation.drain(agent) || before !== reconciliation.version(agent)) {
+          return mayReenterAssembly(context, 'ptc') ? prompt.assemble(context) : next()
+        }
       }
       const entry = entries.get(context.scope as Agent), heldPtc = Boolean(entry?.ptc && entry.owned.size)
       const result = await next()
@@ -324,7 +334,7 @@ export function mountPtc(root: Context, rawConfig: unknown, gate: PtcGate = { al
       try { entry.ptc = false; entry.surface = undefined; entry.pending.clear(); abortOwner(context.scope as Agent, 'PTC presentation withdrawn'); clear(entry) }
       finally { mutating = false }
       void reconcile(true, new Set([context.scope as Agent]))
-      return prompt.assemble(context)
+      return mayReenterAssembly(context, 'ptc') ? prompt.assemble(context) : result
     })
     ctx.on('session/event', (session, event) => {
       if ((event as { type: string }).type === 'agent-preset/selected') {

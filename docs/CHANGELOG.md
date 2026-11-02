@@ -7,6 +7,12 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+- Bound prompt assembly re-entry per hook, so creating a session no longer nests the waterfall 10–18 levels deep, and memoize repeated presentation inspection by a compact signature so unrelated or unattributed changes keep the cached verdict instead of re-probing.
+- 按钩子限制提示装配重入，创建会话不再把装配瀑布嵌套 10–18 层；按紧凑签名记忆重复的展示探测，无关或未归属变更沿用缓存结论，不再重复探测。
+- Retry workspace preparation once after the owner-write ACL grant is applied, and confine result storage only for `workspace-write` on Windows, with `danger-full-access` results kept in a private temp cache location.
+- 应用 owner-write ACL 授权后重试一次工作区准备；Windows 上仅对 `workspace-write` 收敛结果存储，`danger-full-access` 的结果改存私有临时缓存目录。
+- Let pure PTC plans bypass native presentation inspection while still publishing the section, keeping Native discovery independent of typed PTC loading.
+- 纯 PTC 计划绕过原生展示探测但仍发布提示段，让 Native 发现与类型化 PTC 加载保持独立。
 - Keep Native file routing separate from the independent Bash prompt section, so resident Native + Shell consumers do not repeat Bash guidance or advertise host PowerShell routing. Keep deployment guidance single-owned across Bash, Native and discovery sections, including withdrawal and reload.
 - 将 Native 文件路由提示与独立 Bash 提示段分开，避免 Native + Shell 常驻消费者重复 Bash 指导或把 Bash 宣传为宿主 PowerShell 路由。部署指导在 Bash、Native 与发现提示段之间仅保留一份，并覆盖撤回与重载。
 - Update preset hints and rendered settings UI to describe default Bash/PowerShell coexistence; hiding host PowerShell remains an explicit choice.

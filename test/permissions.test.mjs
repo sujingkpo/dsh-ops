@@ -6,7 +6,7 @@ import Sandbox from '@deepseek-ai/dsh-sandbox-local'
 import Subprocess from '@deepseek-ai/dsh-subprocess-local'
 import { assert, test, report, skipSuite, withTempDir, ownWindowsFixture } from './lib/harness.mjs'
 import { bootHost, shutdown } from './lib/host.mjs'
-import { prepareWorkspace, mountWorkspacePreparation, runPreparation, preparationEnvironment, preparationSpawnSpec } from '../lib/workspace-preparation.js'
+import { prepareWorkspace, mountWorkspacePreparation, runPreparation, preparationEnvironment, preparationSpawnSpec, confineWorkspace, missingWriteOwner } from '../lib/workspace-preparation.js'
 import { invoke as fileCall } from '../lib/file/worker.js'
 import { invoke as ptcCall } from '../lib/ptc/worker.js'
 import { tryResolveWorker } from '../lib/ptc/runtime.js'
@@ -93,6 +93,59 @@ await test('preparation coalesces one trusted workspace and retries only failed 
     assert.equal(calls,1)
   })
 })
+/**
+ * A prepared workspace is the common case, and it must not pay for the interpreter.
+ *
+ * The ACL the preparation writes is a standing ACE on the directory: once it is there,
+ * `sandbox.confine` succeeds without a preparatory run, so the first confinement of a workspace
+ * whose grant already exists costs its own 10 ms instead of a Windows PowerShell launch (~1 s
+ * measured cold). Preparing first made every new session in a fresh process — and the first
+ * session after a host restart — wait for that interpreter for a grant that was already correct.
+ */
+await test('confinement does not prepare a workspace whose grant already exists', async () => {
+  let attempts = 0
+  const confined = await confineWorkspace({ mode: 'workspace-write', workspaceRoot: 'D:/fixture' }, async () => { attempts += 1; return 'confined' })
+  assert.equal(confined, 'confined')
+  assert.equal(attempts, 1, 'an existing grant needs the one attempt and no preparatory run')
+})
+/**
+ * A missing grant is repaired exactly once, and only that refusal is treated as repairable.
+ *
+ * `sandbox.confine` fails before it spawns anything, so the retry cannot execute a call twice.
+ * Any other confinement failure (an unusable rung, a policy error) must reach the caller
+ * unchanged: a blanket retry would hide a broken executor behind a one-second retry.
+ */
+await test('a missing WRITE_OWNER grant is prepared once and the confinement retried', async () => {
+  await withTempDir('confine-retry', async root => {
+    const refusal = { name: 'Win32Error', api: 'SetNamedSecurityInfoW', win32Code: 5, message: `SetNamedSecurityInfoW failed (Win32 5): grantWrite(${root})` }
+    let attempts = 0
+    let prepared = 0
+    const confined = await confineWorkspace(
+      { mode: 'workspace-write', workspaceRoot: root },
+      async () => {
+        attempts += 1
+        if (attempts === 1) throw refusal
+        return 'confined'
+      },
+      { platform: 'win32', run() { prepared += 1 } },
+    )
+    assert.equal(confined, 'confined')
+    assert.equal(attempts, 2, 'the refusal is retried once')
+    assert.equal(prepared, 1, 'the repair runs exactly once')
+  })
+})
+await test('any other confinement failure is rethrown without preparing the workspace', async () => {
+  const failure = Object.assign(new Error('SANDBOX_UNAVAILABLE: the runner is unusable'), { api: 'CreateProcessAsUserW', win32Code: 87 })
+  let attempts = 0
+  await assert.rejects(confineWorkspace({ mode: 'workspace-write', workspaceRoot: 'D:/fixture' }, async () => { attempts += 1; throw failure }), /runner is unusable/)
+  assert.equal(attempts, 1, 'an unrelated failure is not retried')
+  assert.equal(missingWriteOwner(failure), false, 'only the ACL refusal is classified as missing')
+  assert.equal(missingWriteOwner(refusalshape()), true)
+})
+/** The one refusal `missingWriteOwner` is defined to repair. */
+function refusalshape() {
+  return { name: 'Win32Error', api: 'SetNamedSecurityInfoW', win32Code: 5 }
+}
 await test('an 8.3 short-name workspace root is prepared, not refused as a link', async () => {
   if(process.platform!=='win32')return
   await withTempDir('prepare-short-name',async root => {

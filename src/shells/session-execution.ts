@@ -4,7 +4,7 @@ import type { ConfinedArgv } from '../adapter/dsh/types.js'
 import type { ShellContext, ShellCall, ShellPolicy, ExecutionOptions, ShellExecution, ShellResult } from './types.js'
 import { bashToolDefinition, withBashStatus } from './tool.js'
 import { confinedBash } from '../bash-ipc.js'
-import { prepareWorkspace } from '../workspace-preparation.js'
+import { confineWorkspace } from '../workspace-preparation.js'
 import { executionRestriction } from '../permissions.js'
 
 export function startSessionBash({ ctx, bash, active }: { ctx: ShellContext; bash: { file: string; source: string }; active(): boolean },
@@ -28,12 +28,13 @@ export function startSessionBash({ ctx, bash, active }: { ctx: ShellContext; bas
     prepareArgv: async (argv: string[], signal: AbortSignal) => {
       signal.throwIfAborted()
       assertAuthority()
-      await prepareWorkspace(policy)
-      signal.throwIfAborted()
       if (policy.mode !== 'danger-full-access') {
         const sandbox = ctx.get('sandbox')
         if (!sandbox?.confine) throw new Error('SANDBOX_UNAVAILABLE: confinement is unavailable; no command executed.')
-        confinement = await sandbox.confine(argv, { ...policy, mode: policy.mode }, signal)
+        // The workspace ACL is prepared only when confinement reports the grant missing: it is a
+        // standing ACE, so a workspace prepared once never launches the interpreter again.
+        const confinedMode = policy.mode
+        confinement = await confineWorkspace(policy, () => sandbox.confine(argv, { ...policy, mode: confinedMode }, signal))
         if (!['full', 'partial'].includes(confinement?.enforcement) || !confinement.argv?.length) throw new Error('SANDBOX_UNAVAILABLE: invalid confinement result; no command executed.')
       }
       signal.throwIfAborted()

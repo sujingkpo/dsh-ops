@@ -19,7 +19,7 @@ import { credentialPath, credentialRefusal, credentialRoots } from '../credentia
 import { sessionTempDir } from '../session-temp.js'
 import { denied, authorityChanged, executionRestriction, normalizeNativeDenial, credentialDenied } from '../permissions.js'
 import { inside, canonicalAnchor } from '../authority-paths.js'
-import { prepareWorkspace } from '../workspace-preparation.js'
+import { confineWorkspace } from '../workspace-preparation.js'
 export { resolveWorker } from './runtime.js'
 export function failure(code: string, message: string, effectState: EffectState = 'none') {
   return { status: 'error', error: { code, phase: effectState === 'none' ? 'preflight' : 'execute', retryable: false, effectState,
@@ -95,8 +95,10 @@ async function invokeTrusted(ctx: Context, file: string, tool: string, args: unk
     if (policy.mode !== 'danger-full-access') {
       const sandbox = ctx.get('sandbox')
       if (!sandbox?.confine) return failure('EXECUTOR_UNAVAILABLE', 'No DSH process confinement provider; refusing unconfined execution.')
-      await prepareWorkspace(policy)
-      confined = await sandbox.confine(argv, { ...policy, mode: policy.mode }, signal)
+      // Preparation launches Windows PowerShell; only a workspace whose grant is actually
+      // missing needs it, and the grant it writes is an ACE that outlives this process.
+      const confinedMode = policy.mode
+      confined = await confineWorkspace(policy, () => sandbox.confine(argv, { ...policy, mode: confinedMode }, signal))
       if (!['full', 'partial'].includes(confined?.enforcement) || !Array.isArray(confined.argv) || !confined.argv.length) {
         return failure('EXECUTOR_UNAVAILABLE', 'Invalid DSH confinement result; refusing unconfined execution.')
       }

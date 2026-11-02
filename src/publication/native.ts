@@ -9,6 +9,7 @@ import { mountResultLifecycle } from '../kernel/result-lifecycle.js'
 import { modeSectionName, MODE_SECTION_ORDERS, renderToolingPolicy } from '../policy.js'
 import { visibleNames } from './surface.js'
 import { isNativePresentation, isPresentationProbe } from './presentation.js'
+import { mayReenterAssembly } from '../assemble-reentry.js'
 import { onToolChange } from './changes.js'
 import type { ResolvedConfig } from '../config.js'
 import { ownScopes } from './ownership.js'
@@ -125,7 +126,7 @@ export function mountNative(root: Context, config: ResolvedConfig, publication: 
         if (!allowed) detach(agent)
         else attach(agent)
         if (entries.has(agent)) await entries.get(agent)?.ready
-        return prompt.assemble(context)
+        return mayReenterAssembly(context, 'native') ? prompt.assemble(context) : result
       }
       return result
     })

@@ -9,7 +9,8 @@ import { nativeProviders, registerNativeProviderAtScope, claimNativeSelection } 
 import { loadScopes } from '../adapter/dsh/host.js'
 import { onToolChange } from '../publication/changes.js'
 import { ownScopes } from '../publication/ownership.js'
-import { isNativePresentation, isPresentationProbe } from '../publication/presentation.js'
+import { isNativePresentation, isPresentationProbe, inspectPresentationShared, forgetPresentation } from '../publication/presentation.js'
+import { visibleNames } from '../publication/surface.js'
 import { mountResultLifecycle } from '../kernel/result-lifecycle.js'
 import { failure, resolveWorker } from '../execution/files.js'
 import { capability, DISCOVERY_TOOL_NAME } from '../capabilities/registry.js'
@@ -25,12 +26,15 @@ import { parseRequest } from './search.js'
 import { InvocationLifetime, InvocationNotStarted } from '../lifecycle/invocations.js'
 import { observeSelection } from './observations.js'
 import { scopedReconciliation, scopeFamilies } from '../publication/reconciliation.js'
+import { mayReenterAssembly } from '../assemble-reentry.js'
 
 export interface DiscoveryGate {
   allows(agent: Agent): boolean; watch?(notify: () => void): () => void; guidance?: boolean; extraGuidance?: string
   /** True only when this agent's assembled prompt has another live section owning this guidance. */
   extraGuidanceOwner?(agent: Agent): boolean
   residentTools?(agent: Agent): ReadonlySet<string> | readonly string[]
+  /** True when every allowed Agent is ptc-only without an assembly (a pure PTC row). */
+  purePtc?(agent: Agent): boolean
   external?: { allowed: readonly string[]; alwaysLoaded: readonly string[]; disabled: readonly string[] }
 }
 interface Entry {
@@ -113,21 +117,46 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
     const catalog = (agent: Agent, callable: ReadonlySet<string>) => nativeCatalog(
       config.allowedTools.filter(tool => selectable(agent, tool)), externalDiscoverable(agent), callable)
     const ptcOnly = (assembly: PromptAssembly): boolean => assembly.sections.some(section => section.name === 'tools:ptc-only' && Boolean(section.text.trim()))
-    const invalidate = (entry: Entry) => { ++entry.revision; entry.presentation = undefined }
+    // 反向索引：让 invalidate（只拿到 entry）也能清掉按 Agent 记的共享装配缓存。
+    const entryAgents = new WeakMap<Entry, Agent>()
+    const invalidate = (entry: Entry) => {
+      ++entry.revision
+      entry.presentation = undefined
+      const owner = entryAgents.get(entry)
+      if (owner) { forgetPresentation(owner) }
+    }
     const inputs = (agent: Agent): unknown[] => {
       const policy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
       return [agent.ctx, agent.session, currentSessionDirectory(ctx, agent), policy?.mode, policy?.workspaceRoot, policy?.sessionId]
     }
     const same = (left: unknown[], right: unknown[]) => left.length === right.length && left.every((value, index) => value === right[index])
+    // 复用装配判定的廉价签名：可见工具名 + 沙箱模式。任一变化都会让共享缓存失效。
+    const presentationSignature = (agent: Agent): string => {
+      try {
+        const policy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
+        return [currentSessionDirectory(ctx, agent), (agent.session as unknown as { mode?: string }).mode, policy?.mode, policy?.workspaceRoot, policy?.sessionId, visibleNames(tools, agent).join('\u0001')].join('|')
+      } catch { return 'unavailable:' + String(Date.now()) + Math.random() }
+    }
     // Only background reconciliation reuses a probe. A step or execution can
     // observe arbitrary dynamic prompt providers with no registry notification.
     const native = async (agent: Agent, fresh = false, signal?: AbortSignal): Promise<boolean> => {
       const entry = entries.get(agent)
       if (!entry || !gate.allows(agent)) return false
       if (fresh) invalidate(entry)
+      // ptc 模式行启用的会话，其呈现必然是 ptc-only：直接判定，不必为它跑一次完整
+      // 装配（冷装配要渲染整份工具 SDK 文档，约 1.3s，且正好压在会话创建的关键路径上）。
+      // 其它模式或未 join 模式时仍走装配判定，保留对动态 section 的兼容。
+      if (gate.purePtc?.(agent)) {
+        entry.presentation = { inputs: inputs(agent), native: false }
+        return false
+      }
       const current = inputs(agent), revision = entry.revision
       if (entry.presentation && same(entry.presentation.inputs, current)) return entry.presentation.native
-      const result = await isNativePresentation(prompt, agent, signal)
+      // fresh（每步执行前）必须重测；后台 reconcile 复用与 PTC 行共享的同一次装配，
+      // 避免一次会话创建里把整套工具 SDK 文档渲染两遍。
+      const result = fresh
+        ? await isNativePresentation(prompt, agent, signal)
+        : !ptcOnly(await inspectPresentationShared(prompt, agent, presentationSignature(agent), signal))
       if (!stopped && !signal?.aborted && entries.get(agent) === entry && revision === entry.revision && same(current, inputs(agent))) {
         entry.presentation = { inputs: current, native: result }
       }
@@ -259,6 +288,7 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
       const entry: Entry = { runtime: new NativeFileTools({ ctx, config: { ...config, required: Boolean(worker) && config.required, workerPath: worker }, report: undefined }),
         calls: new InvocationLifetime(), selected: new Set(), pending: new Set(), externalSelected: new Set(), externalPending: new Set(), disposers: [], owned: new Set(), ready: Promise.resolve(), revision: 0 }
       entry.releaseObservation = observeSelection(ctx, agent, entry.externalPending)
+      entryAgents.set(entry, agent)
       entries.set(agent, entry); ownership?.track(agent)
       entry.fiber = agent.ctx.plugin({ inject: ['tools'], apply(scoped) { entry.ctx = scoped } })
       entry.ready = Promise.resolve(entry.fiber).then(async () => { await entry.runtime.start([]); await reconcile([agent]) })
@@ -309,7 +339,13 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
     }
     onToolChange(ctx, scopes => {
       if (mutating || ownership?.publishing()) return
-      if (!scopes?.length) { refresh(); return }
+      // An unattributed change cannot be narrowed to a scope. Dropping every probe here
+      // makes the next reconcile re-assemble the prompt once per live Agent, so creating
+      // one session costs N+1 full assemblies and the click waits for all of them. Keep
+      // the cached verdicts and reconcile instead: agents whose observed inputs changed
+      // still re-probe, and the step/execution probes (always fresh) remain the authority
+      // on whether discovery may publish at all.
+      if (!scopes?.length) { void reconcile(); return }
       const affected = new Set<Agent>()
       for (const [agent, entry] of entries) if (scopes.some(scope => scopeChainOf(agent).includes(scope))) { invalidate(entry); affected.add(agent) }
       void reconcile(affected)
@@ -340,7 +376,9 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
       if (!isPresentationProbe(context)) {
         const agent = context.scope as Agent, entry = entries.get(agent), before = work.version(agent)
         await entry?.ready
-        if (await work.drain(agent) || before !== work.version(agent)) return prompt.assemble(context)
+        if (await work.drain(agent) || before !== work.version(agent)) {
+          return mayReenterAssembly(context, 'discovery') ? prompt.assemble(context) : next()
+        }
       }
       const entry = entries.get(context.scope as Agent)
       // Snapshot ownership before yielding: another assembly may withdraw it while
@@ -353,7 +391,7 @@ export function mountDiscovery(root: Context, raw: unknown, gate: DiscoveryGate)
       finally { mutating = false }
       // Rebuild through the public host service after removing only our tools.
       // This cannot activate pending requests or rewrite another provider's text.
-      return prompt.assemble(context)
+      return mayReenterAssembly(context, 'discovery') ? prompt.assemble(context) : result
     })
     ctx.on('session/event', (session, event) => {
       if ((event as { type: string }).type === 'agent-preset/selected') {
